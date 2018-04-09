@@ -10,6 +10,9 @@
 #include <algorithm>
 #include <iostream>
 #include <ctime>
+#include <unordered_map>
+#include <future>
+#include <chrono>
 
 struct QSAChar {
 
@@ -37,13 +40,17 @@ struct QSALength {
 
 };
 
+struct QSAIndex {
+	std::vector<QSAChar> c;
+	int totalCount = 0;
+};
+
 struct QSAStruct {
 
 	std::vector<QSALength> lengths;
-	std::vector<QSAChar> characters;
+	std::unordered_map<int, QSAIndex> indices;
 	
 	int lineCount = 0;
-	int characterCount = 0;
 
 };
 
@@ -54,15 +61,14 @@ bool analyze(QSAStruct &qsa, std::string &str) {
 	if (!input.good())
 		return false;
 
-	qsa.lengths.reserve(1024);
-	qsa.characters.reserve(256);
+	qsa.lengths.reserve(128);
+	qsa.indices.reserve(128 * 16);
 
 	for (std::string line; getline(input, line); ) {
 
 		int lsize = (int) line.size();
 
 		++qsa.lineCount;
-		qsa.characterCount += lsize;
 
 		bool contains = false;
 
@@ -76,11 +82,16 @@ bool analyze(QSAStruct &qsa, std::string &str) {
 		if (!contains)
 			qsa.lengths.push_back({ 1, lsize });
 
+		int i = 0;
+
 		for (char &c : line) {
 
 			contains = false;
 
-			for (QSAChar &qc : qsa.characters)
+			QSAIndex &index = qsa.indices[i];
+			++index.totalCount;
+
+			for (QSAChar &qc : index.c)
 				if (qc.c == c) {
 					contains = true;
 					++qc.count;
@@ -88,19 +99,24 @@ bool analyze(QSAStruct &qsa, std::string &str) {
 				}
 
 			if (!contains)
-				qsa.characters.push_back({ 1, c });
+				index.c.push_back({ 1, c });
 
+
+			++i;
 		}
 	}
 
 	std::sort(qsa.lengths.begin(), qsa.lengths.end());
-	std::sort(qsa.characters.begin(), qsa.characters.end());
+
+	for(auto &ind : qsa.indices)
+		std::sort(ind.second.c.begin(), ind.second.c.end());
 
 	for (QSALength &length : qsa.lengths)
 		length.occurence = (float) length.count / qsa.lineCount;
 
-	for (QSAChar &c : qsa.characters)
-		c.occurence = (float)c.count / qsa.characterCount;
+	for (auto &ind : qsa.indices)
+		for(QSAChar &c : ind.second.c)
+			c.occurence = (float)c.count / ind.second.totalCount;
 
 	return true;
 }
@@ -134,12 +150,14 @@ int pickLength(QSAStruct &qsa) {
 	return qsa.lengths[0].length;
 }
 
-char pickChar(QSAStruct &qsa) {
+char pickChar(QSAStruct &qsa, int i) {
 
 	float r = frand();
 	float val = 0;
 
-	for (QSAChar &c : qsa.characters) {
+	QSAIndex &index = qsa.indices[i];
+
+	for (QSAChar &c : index.c) {
 
 		val += c.occurence;
 
@@ -148,7 +166,7 @@ char pickChar(QSAStruct &qsa) {
 
 	}
 
-	return qsa.characters[0].c;
+	return index.c[0].c;
 }
 
 void generate(QSAStruct &qsa, std::string &s) {
@@ -156,8 +174,12 @@ void generate(QSAStruct &qsa, std::string &s) {
 	int length = pickLength(qsa);
 	s.resize(length, ' ');
 
-	for (char &c : s)
-		c = pickChar(qsa);
+	int i = 0;
+
+	for (char &c : s) {
+		c = pickChar(qsa, i);
+		++i;
+	}
 
 }
 
@@ -183,6 +205,32 @@ void smartGenerate(QSAStruct &qsa, std::vector<std::string> &s, int count) {
 
 		++i;
 	}
+
+}
+
+void batchGenerate(QSAStruct &qsa, std::vector<std::string> &s, int count) {
+
+	s.resize(count);
+
+	std::vector<std::string> *sptr = &s;
+	QSAStruct *qsaptr = &qsa;
+
+	unsigned int thrs = std::thread::hardware_concurrency();
+	unsigned int perThread = (unsigned int) count / thrs;
+	unsigned int leftOver = perThread;
+
+	std::vector<std::future<void>> fs(thrs);
+
+	for (unsigned int i = 0; i < thrs; ++i)
+		fs[i] = std::move(std::async([perThread, leftOver, sptr, qsaptr, count](unsigned int j) -> void {
+
+				unsigned int c = (j == 0 ? leftOver : 0) + perThread;
+				unsigned int off = j == 0 ? 0 : leftOver + perThread * j;
+
+				for (unsigned int k = off; k < off + c && k < count; ++k)
+					generate(*qsaptr, (*sptr)[k]);
+
+		}, i));
 
 }
 
@@ -221,8 +269,7 @@ int main(int argc, char *argv[]) {
 	}
 
 	printf("Analyzed the strings!\n");
-	printf("Contains %u different lengths and %u different characters\n", qsa.lengths.size(), qsa.characters.size());
-	printf("From %u lines and %u characters\n", qsa.lineCount, qsa.characterCount);
+	printf("Contains %u different lengths from %u lines\n", (unsigned int) qsa.lengths.size(), qsa.lineCount);
 
 	if (qsa.lengths.size() == 1)
 		printf("Determined the length of a string to be %u exactly\n", qsa.lengths[0].length);
@@ -234,25 +281,34 @@ int main(int argc, char *argv[]) {
 			printf("%u: %f%%\n", l.length, l.occurence * 100);
 	}
 
-	if(qsa.characters.size() == 1)
-		printf("Determined the character to be '%c' exactly\n", qsa.characters[0].c);
-	else {
+	printf("Here are possible character results based on likeliness\n");
 
-		printf("Here are possible character results based on likeliness\n");
+	size_t possible = 1;
 
-		for (QSAChar &c : qsa.characters)
-			printf("'%c': %f%%\n", c.c, c.occurence * 100);
+	for (auto &ind : qsa.indices) {
+		printf("%u: analyzed %u chars; %u unique\n", ind.first, ind.second.totalCount, (unsigned int) ind.second.c.size());
+		for (QSAChar &c : ind.second.c)
+			printf("%u; '%c': %f%%\n", ind.first, c.c, c.occurence);
+		possible *= ind.second.c.size();
 	}
 
-	printf("Enter the number of words you want to generate\n");
+	printf("This keysequence has %I64u different outcomes\n", possible);
+
+	printf("Enter the number of sequences you want to generate\n");
 
 	int count;
 	std::cin >> count;
 
-	srand(time(0));
+	srand((unsigned int)time(0));
+
+	auto timePoint0 = std::chrono::high_resolution_clock::now();
 
 	std::vector<std::string> keys;
-	smartGenerate(qsa, keys, count);
+	//smartGenerate(qsa, keys, count);
+	batchGenerate(qsa, keys, count);
+
+	auto timePoint1 = std::chrono::high_resolution_clock::now();
+	printf("BatchGenerate took %fs\n", std::chrono::duration<float>(timePoint1 - timePoint0).count());
 
 	printf("Output to console? y/n\n");
 
